@@ -12,4 +12,6 @@ anyhow = "1.0"
 rand = "0.8"
 serde = { version = "1.0.152", features = ["derive"] }
 serde_json = "1.0.93"
+pdfium-render = "0.7.30"
+image = "0.24.5"
 
