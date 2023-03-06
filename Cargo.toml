@@ -14,4 +14,5 @@ serde = { version = "1.0.152", features = ["derive"] }
 serde_json = "1.0.93"
 pdfium-render = "0.7.30"
 image = "0.24.5"
+show-image = { version = "0.13.1", features = ["image"] }
 
