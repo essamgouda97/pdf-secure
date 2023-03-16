@@ -1,13 +1,14 @@
 // TODO Error handling
 // TODO Handle windows and linux paths
 // TODO security on all saved files
+// TODO script to autogenerate key and nonce
 
 use std::{
     str,
     process,
     path::Path,
     fs::{self, File, read_to_string}, 
-    collections::HashMap,
+    collections::{HashMap, HashSet},
 };
 
 use anyhow::anyhow;
@@ -19,6 +20,7 @@ use serde::{Serialize, Deserialize};
 use serde_json;
 use pdfium_render::prelude::*;
 use show_image::{create_window, event};
+use glob::glob;
 
 // Constansts
 const BIN_PATH: &str = ".\\bin\\";
@@ -33,13 +35,16 @@ const NONCE: [u8; 24] =  [213, 85, 53, 54, 40, 196,
                         219, 239, 120, 62, 63, 205, 
                         43, 146, 64, 252, 128, 242, 
                         103, 225, 59, 7, 43, 130];
-
+const INDEX_CHAR: &str = "@@";
+const IMAGES_PREFIX: &str = "_@@.enc";
 
 #[derive(Serialize, Deserialize, Debug)]
 struct MetaData {
     file_open_count: i8, // number of times file is opened
     max_files_open_count: i8, // maximum number of times a file is allowed to be opened
     renders_config: HashMap<usize, (u32, u32)>,
+    glob_pattern: String,
+    number_of_images: i32,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -64,6 +69,17 @@ impl DB {
         ){
             self.data.insert(key.to_string(), value);
     }
+
+    // Used to update an existing entry
+    fn update_file_open_count(
+        &mut self,
+        key: &str,
+        file_open_count: i8,
+    ) {
+        if let Some(metadata) = self.data.get_mut(key) {
+            metadata.file_open_count = file_open_count;
+        }
+    }
 }
 
 
@@ -76,7 +92,7 @@ fn get_usb_id() -> String{
    return content;
 }
 
-fn export_pdf_to_jpegs(path: &str, password: Option<&str>) -> Result<HashMap<usize, (u32, u32)>, PdfiumError> {
+fn export_pdf_to_jpegs(path: &str, password: Option<&str>) -> Result<(HashMap<usize, (u32, u32)>, i32), PdfiumError> {
     // Renders each page in the PDF file at the given path to a separate JPEG file.
 
     // Bind to a Pdfium library in the same directory as our Rust executable;
@@ -102,6 +118,7 @@ fn export_pdf_to_jpegs(path: &str, password: Option<&str>) -> Result<HashMap<usi
 
     // ... then render each page to a bitmap image, saving each image to a JPEG file.
     let mut render_config_data = HashMap::new();
+    let mut pages_num: i32 = 0;
     for (index, page) in document.pages().iter().enumerate() {
         let temp = page
             .render_with_config(&render_config)
@@ -118,11 +135,12 @@ fn export_pdf_to_jpegs(path: &str, password: Option<&str>) -> Result<HashMap<usi
         let encrypted_data = cipher
             .encrypt(&NONCE.into(), temp.into_raw().as_ref())
             .unwrap();
-        fs::write(format!("{}_{}.bin", path, index), encrypted_data);
-     
+        let prefix_image = IMAGES_PREFIX.replace(INDEX_CHAR, index.to_string().as_str());
+        fs::write(format!("{}{}", path, prefix_image), encrypted_data);
+        pages_num+=1;
     }
 
-    Ok(render_config_data)
+    Ok((render_config_data, pages_num))
 }
 
 fn encrypt_mode(usb_id: &String) -> Result<(), anyhow::Error>{
@@ -143,7 +161,7 @@ fn encrypt_mode(usb_id: &String) -> Result<(), anyhow::Error>{
        
         let file_data = fs::read(&p)?;
         println!("Converting {} to jpegs", filename); 
-        let renders_config = export_pdf_to_jpegs(&filename, None).unwrap();
+        let (renders_config, pages_num) = export_pdf_to_jpegs(&filename, None).unwrap();
         fs::remove_file(p)?; // remove pdf
     
         // Ask user for number of times for file
@@ -157,6 +175,8 @@ fn encrypt_mode(usb_id: &String) -> Result<(), anyhow::Error>{
             file_open_count: 1,
             max_files_open_count: max_number_open,
             renders_config: renders_config,
+            glob_pattern: format!("{}{}", filename, IMAGES_PREFIX),
+            number_of_images: pages_num,
         };
         db.join(&filename, db_data);         
     
@@ -192,7 +212,7 @@ fn decrypt_mode(usb_id: &String) -> Result<(), anyhow::Error>{
         Ok(v) => v,
         Err(e) => panic!("Invalid UTF-8 sequence: {}", e),
     };
-    let db_data: DB = serde_json::from_str(db_data_decoded).unwrap();
+    let mut db_data: DB = serde_json::from_str(db_data_decoded).unwrap();
 
     // Confirm usb_id
     let current_usb_id = get_usb_id();
@@ -202,47 +222,112 @@ fn decrypt_mode(usb_id: &String) -> Result<(), anyhow::Error>{
     }
 
     // Ask user which file to view
-    
+    // TODO loop through db_data for all keys and ask user which file do they want to view
 
-    // View file
-    let mut index: usize = 0;
-    let temp_filename: &str = ".\\Files\\test.pdf"; // TODO replace by file picker
-    let file_metadata: &MetaData = db_data.data.get(temp_filename).unwrap();
-   
-    let max_pages = file_metadata.renders_config.len();
-    let dynamic_image = read_image(temp_filename, index, file_metadata).unwrap();
-            
-    // view image
-    let window = create_window("image", Default::default()).expect("Failed to create window");
-    window.set_image("image-001", dynamic_image).expect("Failed to set image");
-    // If the user closes the window, the channel is closed and the loop also exits.
-    for event in window.event_channel()? {
-    if let event::WindowEvent::KeyboardInput(event) = event {
-        if event.input.key_code == Some(event::VirtualKeyCode::Escape) && event.input.state.is_pressed() {
+    // read files in db.json
+    loop{
+
+        // Show files to user
+        let mut selected_file = String::new();
+        let mut available_inputs: HashSet<String> = db_data.data
+            .iter()
+            .enumerate()
+            .map(|(i, _)| i.to_string())
+            .collect();
+
+        println!("\n\nWhich file do you want to view? Type q to exit\n");
+        let mut filenames: HashMap<String, String> = HashMap::new();
+        let max_index = db_data.data.len();
+        for (index, (key, _)) in db_data.data.iter().enumerate(){
+            let index_display = index + 1;
+            let filename_display =  key.split('\\').last().unwrap();
+            println!("{}-  {}", index_display,filename_display);
+            let index_str = index_display.to_string();
+            filenames.insert(index_str, key.clone());
+        }
+
+        std::io::stdin().read_line(&mut selected_file).unwrap();
+        let selected_file = selected_file.trim();
+        if selected_file.parse::<usize>().unwrap() > max_index{
+            println!("{} is not a valid input", selected_file);
+            continue;
+        }
+        // Check if the input is "q"
+        if selected_file == "q" {
             break;
         }
-        if event.input.key_code == Some(event::VirtualKeyCode::Right) && event.input.state.is_pressed() && index+1 < max_pages{
-            index+=1;
-            let dynamic_image = read_image(temp_filename, index, file_metadata).unwrap();
-            window.set_image("image-001", dynamic_image).expect("Failed to set image");
-        }
-        if event.input.key_code == Some(event::VirtualKeyCode::Left) && event.input.state.is_pressed() && index > 0{
-            index-=1;
-            let dynamic_image = read_image(temp_filename, index, file_metadata).unwrap();
-            window.set_image("image-001", dynamic_image).expect("Failed to set image");
+
+        // Check if the input is in available_inputs
+        if available_inputs.contains(selected_file) {
+            let filename = filenames.get(selected_file).unwrap();
+            let filename_display =  filename.split('\\').last().unwrap();
+            let mut file_metadata: &MetaData = db_data.data.get(filename).unwrap();
+
+            // Check if file is allowed to be opened
+            if file_metadata.file_open_count > file_metadata.max_files_open_count{
+                println!("{} can't be opened anymore", filename_display);
+                continue;
+            }
+            
+            // view file
+            let mut index: usize = 0;
+            let current_image = read_image(filename, index, file_metadata).unwrap();
+            let max_pages = file_metadata.number_of_images;
+
+            // view image
+            let window = create_window("Secure PDF Viewer", Default::default())
+                .expect("Failed to create window");
+            window.set_image(format!("Page {}/{}", index+1, max_pages), current_image)
+                .expect("Failed to set image");
+    
+            for event in window.event_channel()? {
+                if let event::WindowEvent::KeyboardInput(event) = event {
+                    if event.input.key_code == Some(event::VirtualKeyCode::Escape) 
+                        && event.input.state.is_pressed() {
+                        break;
+                    }
+                    if event.input.key_code == Some(event::VirtualKeyCode::Right) 
+                        && event.input.state.is_pressed() 
+                        && index+1 < max_pages as usize{
+                            index+=1;
+                            let current_image = read_image(filename, index, file_metadata)
+                                .unwrap();
+                            window.set_image(format!("Page {}/{}", index+1, max_pages),current_image)
+                                .expect("Failed to set image");
+                    }
+                    if event.input.key_code == Some(event::VirtualKeyCode::Left) 
+                        && event.input.state.is_pressed() && index > 0{
+                            index-=1;
+                            let current_image = read_image(filename, index, file_metadata).unwrap();
+                            window.set_image(format!("Page {}/{}", index+1, max_pages), current_image)
+                                .expect("Failed to set image");
+                    }
+                }
+            }
+            // Update, save db.json
+            db_data.update_file_open_count(filename, file_metadata.file_open_count+1);
+            let mut db_file = File::create("db.json").expect("Failed to create db.json");
+            let db = serde_json::to_string(&db_data).unwrap();
+            let encrypted_db = cipher
+                .encrypt(&NONCE.into(), db.as_ref())
+                .map_err(|err| anyhow!("Ecrypting db: {}", err))?;
+            fs::write("db.json", encrypted_db)?;  
+        } else {
+            println!("Please pick a valid file from the options, try again !");
+            continue;
         }
     }
-}
 
     Ok(())
 }
+
 
 fn read_image(filename: &str, index: usize, file_metadata: &MetaData) -> Result<image::DynamicImage, anyhow::Error>{
     
 
     let cipher = XChaCha20Poly1305::new(&KEY.into());
-
-    let data_encrypted= fs::read(format!("{}_{}.bin", filename, index)).expect("Couldn't read pdf file");
+    let prefix_image = IMAGES_PREFIX.replace(INDEX_CHAR, index.to_string().as_str());
+    let data_encrypted= fs::read(format!("{}{}", filename, prefix_image)).expect("Couldn't read pdf file");
     let rgba_data: Vec<u8> = cipher
         .decrypt(&NONCE.into(), data_encrypted.as_ref())
         .map_err(|err| anyhow!("Decrypting pdf: {}", err))?;
@@ -284,8 +369,8 @@ fn main() {
 
 
     println!("Which mode do you want to select?");
-    println!("1. Encrypt");
-    println!("2. Decrypt");
+    println!("1. Setup USB device");
+    println!("2. View PDF files");
     
     // Select mode
     let mut mode = String::new();
@@ -294,10 +379,8 @@ fn main() {
     let mode: u8 = mode.trim().parse().expect("Please type a number!");
     
     if mode == 1 {
-        println!("Encrypt mode selected");
         let result = encrypt_mode(&usb_id).unwrap();
     } else if mode == 2 {
-        println!("Decrypt mode selected");
         let result = decrypt_mode(&usb_id).unwrap();
     } else {
         println!("Invalid mode selected");
