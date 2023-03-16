@@ -165,7 +165,7 @@ fn encrypt_mode(usb_id: &String) -> Result<(), anyhow::Error>{
         fs::remove_file(p)?; // remove pdf
     
         // Ask user for number of times for file
-        println!("What's the maximum number of time is {} allowed to be opened", filename);
+        println!("\n\nWhat's the maximum number of time is {} allowed to be opened ?\n", filename);
         let mut max_number_open = String::new();
         std::io::stdin().read_line(&mut max_number_open).expect("Failed to read line");
         let max_number_open: i8 = max_number_open.trim().parse().expect("Please enter a positive number");        
@@ -237,7 +237,6 @@ fn decrypt_mode(usb_id: &String) -> Result<(), anyhow::Error>{
 
         println!("\n\nWhich file do you want to view? Type q to exit\n");
         let mut filenames: HashMap<String, String> = HashMap::new();
-        let max_index = db_data.data.len();
         for (index, (key, _)) in db_data.data.iter().enumerate(){
             let index_display = index + 1;
             let filename_display =  key.split('\\').last().unwrap();
@@ -248,10 +247,6 @@ fn decrypt_mode(usb_id: &String) -> Result<(), anyhow::Error>{
 
         std::io::stdin().read_line(&mut selected_file).unwrap();
         let selected_file = selected_file.trim();
-        if selected_file.parse::<usize>().unwrap() > max_index{
-            println!("{} is not a valid input", selected_file);
-            continue;
-        }
         // Check if the input is "q"
         if selected_file == "q" {
             break;
